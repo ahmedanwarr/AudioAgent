@@ -29,8 +29,8 @@ class AudioRAGApp:
             st.session_state.current_transcript = ""
             
             try:
-                # Get audio input and transcribe
-                await get_transcript(handle_transcript)
+                # Get audio input and transcribe (no longer stopping TTS at the beginning)
+                await get_transcript(handle_transcript, self.tts)
                 
                 # Get the transcript
                 transcript = st.session_state.current_transcript
@@ -47,7 +47,7 @@ class AudioRAGApp:
                         st.write(f"Assistant: {response}")
                         
                         # Convert response to speech
-                        self.tts.speak(response)
+                        await self.tts.speak(response)
                         
                         # Check for exit command
                         if "goodbye" in transcript.lower():

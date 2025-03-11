@@ -8,6 +8,8 @@ import time
 import os
 import certifi
 import ssl
+import tempfile
+
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
@@ -27,58 +29,50 @@ from deepgram import (
     LiveTranscriptionEvents,
     LiveOptions,
     Microphone,
+    SpeakOptions
 )
 
 load_dotenv()
 
 
 class TextToSpeech:
-    # Set your Deepgram API Key and desired voice model
-    DG_API_KEY = os.getenv("DEEPGRAM_API_KEY")
-    MODEL_NAME = "aura-helios-en"  # Example model name, change as needed
+    def __init__(self):
+        self.api_key = os.getenv("DEEPGRAM_API_KEY")
+        self.deepgram = DeepgramClient(self.api_key)
+        self.current_process = None
 
-    @staticmethod
-    def is_installed(lib_name: str) -> bool:
-        lib = shutil.which(lib_name)
-        return lib is not None
+    def stop_speaking(self):
+        if self.current_process and self.current_process.poll() is None:
+            self.current_process.terminate()
+            self.current_process.wait()
 
-    def speak(self, text):
-        if not self.is_installed("ffplay"):
-            raise ValueError("ffplay not found, necessary to stream audio.")
+    async def speak(self, text, model="aura-stella-en"):
+        try:
+            # Create a temporary file
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
+                temp_filename = temp_file.name
 
-        DEEPGRAM_URL = f"https://api.deepgram.com/v1/speak?model={self.MODEL_NAME}&performance=true&encoding=linear16&sample_rate=24000"
-        headers = {
-            "Authorization": f"Token {self.DG_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "text": text
-        }
+            # Generate the audio file
+            options = SpeakOptions(model=model)
+            text_dict = {"text": text}
+            self.deepgram.speak.v("1").save(temp_filename, text_dict, options)
 
-        player_command = ["ffplay", "-autoexit", "-", "-nodisp"]
-        player_process = subprocess.Popen(
-            player_command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+            # Play the audio file using ffplay
+            if os.path.exists(temp_filename):
+                # Store the process so we can interrupt it later
+                self.current_process = subprocess.Popen(
+                    ["ffplay", "-nodisp", "-autoexit", temp_filename],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                # Don't wait for the process to complete - let it run in background
+            else:
+                print(f"Error: {temp_filename} not found.")
 
-        start_time = time.time()  # Record the time before sending the request
-        first_byte_time = None  # Initialize a variable to store the time when the first byte is received
-
-        with requests.post(DEEPGRAM_URL, stream=True, headers=headers, json=payload) as r:
-            for chunk in r.iter_content(chunk_size=1024):
-                if chunk:
-                    if first_byte_time is None:  # Check if this is the first chunk received
-                        first_byte_time = time.time()  # Record the time when the first byte is received
-                        ttfb = int((first_byte_time - start_time)*1000)  # Calculate the time to first byte
-                        print(f"TTS Time to First Byte (TTFB): {ttfb}ms\n")
-                    player_process.stdin.write(chunk)
-                    player_process.stdin.flush()
-
-        if player_process.stdin:
-            player_process.stdin.close()
-        player_process.wait()
+        except Exception as e:
+            print(f"Exception: {e}")
+            if os.path.exists(temp_filename):
+                os.remove(temp_filename)
 
 class TranscriptCollector:
     def __init__(self):
@@ -95,9 +89,9 @@ class TranscriptCollector:
 
 transcript_collector = TranscriptCollector()
 
-async def get_transcript(callback):
-    transcription_complete = asyncio.Event()  # Event to signal transcription completion
-
+async def get_transcript(callback, tts=None):
+    transcription_complete = asyncio.Event()
+    
     try:
         # example of setting up a client config. logging values: WARNING, VERBOSE, DEBUG, SPAM
         config = DeepgramClientOptions(options={"keepalive": "true"})
@@ -109,24 +103,27 @@ async def get_transcript(callback):
         deepgram: DeepgramClient = DeepgramClient(os.getenv("DEEPGRAM_API_KEY"), config)
 
         dg_connection = deepgram.listen.asynclive.v("1")
-        print ("Listening...")
+        print("Listening...")
 
         async def on_message(self, result, **kwargs):
             sentence = result.channel.alternatives[0].transcript
             
             if not result.speech_final:
+                # Stop TTS if it's currently playing when user starts speaking
+                if tts:
+                    tts.stop_speaking()
+                    print("User started speaking, stopping current TTS playback")
                 transcript_collector.add_part(sentence)
             else:
                 # This is the final part of the current sentence
                 transcript_collector.add_part(sentence)
                 full_sentence = transcript_collector.get_full_transcript()
-                # Check if the full_sentence is not empty before printing
                 if len(full_sentence.strip()) > 0:
                     full_sentence = full_sentence.strip()
                     print(f"Human: {full_sentence}")
-                    callback(full_sentence)  # Call the callback with the full_sentence
+                    callback(full_sentence)
                     transcript_collector.reset()
-                    transcription_complete.set()  # Signal to stop transcription and exit
+                    transcription_complete.set()
 
         dg_connection.on(LiveTranscriptionEvents.Transcript, on_message)
 
