@@ -3,3 +3,4 @@ venv
 .env
 output.wav
 hp_vectorstore.faiss
+__pycache__
