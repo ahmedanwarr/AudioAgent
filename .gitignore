@@ -1,0 +1,5 @@
+
+venv
+.env
+output.wav
+hp_vectorstore.faiss
